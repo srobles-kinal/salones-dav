@@ -23,11 +23,17 @@ app.use(helmet({
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
 }));
 
+const allowedOrigins = (process.env.CORS_ORIGIN || '')
+  .split(',')
+  .map(o => o.trim().replace(/\/$/, ''))  // quita espacios y / final
+  .filter(Boolean);
+
 app.use(cors({
-  origin: (origin, callback) => {
-    const allowed = env.ALLOWED_ORIGINS;
-    if (!origin || allowed.includes(origin)) return callback(null, true);
-    return callback(new Error(`CORS bloqueado para ${origin}`));
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);  // permite curl/postman/health
+    const cleanOrigin = origin.replace(/\/$/, '');
+    if (allowedOrigins.includes(cleanOrigin)) return cb(null, true);
+    return cb(new Error('CORS bloqueado para ' + origin));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
