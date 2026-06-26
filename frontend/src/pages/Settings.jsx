@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Settings as SettingsIcon, Mail, Baby, Save, TestTube2 } from 'lucide-react';
+import { Settings as SettingsIcon, Mail, Baby, Save, TestTube2, Key } from 'lucide-react';
 import toast from 'react-hot-toast';
 import * as settingsApi from '../api/settingsApi';
 import Spinner from '../components/common/Spinner';
@@ -24,18 +24,17 @@ export default function Settings() {
   const setField = (key, value) => setEdited(prev => ({ ...prev, [key]: value }));
 
   const hasChanges = config && Object.keys(edited).some(k =>
-    k !== '_SMTP_PASS_SET' && edited[k] !== config[k]);
+    !k.startsWith('_') && edited[k] !== config[k]);
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      // Solo enviar los campos que cambiaron
       const updates = {};
       Object.keys(edited).forEach(k => {
-        if (k !== '_SMTP_PASS_SET' && edited[k] !== config[k]) updates[k] = edited[k];
+        if (!k.startsWith('_') && edited[k] !== config[k]) updates[k] = edited[k];
       });
-      // Si SMTP_PASS sigue siendo '****' no se envía
       if (updates.SMTP_PASS === '****') delete updates.SMTP_PASS;
+      if (updates.BREVO_API_KEY === '****') delete updates.BREVO_API_KEY;
 
       const r = await settingsApi.update(updates);
       setConfig(r.data.data); setEdited(r.data.data);
@@ -49,8 +48,9 @@ export default function Settings() {
     setTesting(true);
     try {
       const r = await settingsApi.testEmail();
-      if (r.data.data.ok) toast.success(r.data.data.message);
-      else toast.error(r.data.data.message);
+      const result = r.data.data;
+      if (result.ok) toast.success(result.message, { duration: 6000 });
+      else toast.error(`${result.message}${result.hint ? '\n💡 ' + result.hint : ''}`, { duration: 8000 });
     } catch (err) {
       toast.error(err.response?.data?.error?.message || 'Error');
     } finally { setTesting(false); }
@@ -104,11 +104,16 @@ export default function Settings() {
         </div>
       </div>
 
-      {/* Email */}
+      {/* Email vía Brevo */}
       <div className="card mb-4">
         <h2 className="font-semibold text-slate-800 mb-4 flex items-center gap-2 pb-3 border-b">
-          <Mail size={18} className="text-blue-600" /> Notificaciones por correo
+          <Mail size={18} className="text-blue-600" /> Notificaciones por correo (Brevo)
         </h2>
+
+        <div className="bg-blue-50 border border-blue-200 rounded p-3 text-xs text-blue-900 mb-4">
+          <strong>📌 Importante:</strong> El sistema usa <strong>Brevo</strong> (HTTP API) para enviar correos,
+          ya que Render bloquea SMTP en el tier free desde sep/2025. Brevo es gratis hasta 300 correos/día.
+        </div>
 
         <div className="mb-4">
           <label className="flex items-center gap-2 cursor-pointer">
@@ -118,18 +123,18 @@ export default function Settings() {
               className="w-4 h-4 text-muni-primary rounded" />
             <span className="text-sm font-medium">Habilitar envío de correos</span>
           </label>
-          <p className="text-xs text-slate-500 mt-1 ml-6">
-            Cuando esté activo, se enviarán correos al solicitante en cada cambio de estado de la reserva.
-          </p>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="label">Correo remitente (FROM)</label>
+            <label className="label">Correo remitente (FROM) *</label>
             <input type="email" className="input" disabled={!canUpdate}
               value={edited.EMAIL_FROM || ''}
               placeholder="no-reply@muniguate.gt"
               onChange={(e) => setField('EMAIL_FROM', e.target.value)} />
+            <p className="text-xs text-amber-600 mt-1">
+              ⚠️ Debe estar verificado como sender en Brevo (app.brevo.com → Senders).
+            </p>
           </div>
           <div>
             <label className="label">Nombre del remitente</label>
@@ -138,42 +143,20 @@ export default function Settings() {
               placeholder="Sistema de Salones DAV"
               onChange={(e) => setField('EMAIL_FROM_NAME', e.target.value)} />
           </div>
-          <div>
-            <label className="label">Servidor SMTP (HOST)</label>
-            <input className="input" disabled={!canUpdate}
-              value={edited.SMTP_HOST || ''}
-              placeholder="smtp.gmail.com / smtp.muniguate.gt"
-              onChange={(e) => setField('SMTP_HOST', e.target.value)} />
-          </div>
-          <div>
-            <label className="label">Puerto</label>
-            <input type="number" className="input" disabled={!canUpdate}
-              value={edited.SMTP_PORT || 587}
-              onChange={(e) => setField('SMTP_PORT', parseInt(e.target.value, 10))} />
-            <p className="text-xs text-slate-500 mt-1">587 (TLS) · 465 (SSL) · 25 (sin cifrado)</p>
-          </div>
-          <div>
-            <label className="label">Usuario SMTP</label>
-            <input className="input" disabled={!canUpdate}
-              value={edited.SMTP_USER || ''}
-              placeholder="usuario@dominio"
-              onChange={(e) => setField('SMTP_USER', e.target.value)} />
-          </div>
-          <div>
-            <label className="label">Contraseña SMTP</label>
-            <input type="password" className="input" disabled={!canUpdate}
-              value={edited.SMTP_PASS || ''}
-              placeholder={config?._SMTP_PASS_SET ? 'Deja vacío para mantener actual' : 'Ingresa contraseña'}
-              onChange={(e) => setField('SMTP_PASS', e.target.value)} />
-          </div>
-          <div>
-            <label className="flex items-center gap-2 cursor-pointer mt-6">
-              <input type="checkbox" disabled={!canUpdate}
-                checked={!!edited.SMTP_SECURE}
-                onChange={(e) => setField('SMTP_SECURE', e.target.checked)}
-                className="w-4 h-4 text-muni-primary rounded" />
-              <span className="text-sm">Conexión SSL (puerto 465)</span>
+          <div className="md:col-span-2">
+            <label className="label flex items-center gap-1">
+              <Key size={14} /> Brevo API Key *
             </label>
+            <input type="password" className="input font-mono" disabled={!canUpdate}
+              value={edited.BREVO_API_KEY || ''}
+              placeholder={config?._BREVO_API_KEY_SET ? '**** (deja vacío para mantener actual)' : 'xkeysib-...'}
+              onChange={(e) => setField('BREVO_API_KEY', e.target.value)} />
+            <p className="text-xs text-slate-500 mt-1">
+              Genera la API key en{' '}
+              <a href="https://app.brevo.com/settings/keys/api" target="_blank" rel="noreferrer"
+                 className="text-muni-primary underline">app.brevo.com → SMTP & API</a>.
+              Empieza con <code className="bg-slate-100 px-1 rounded">xkeysib-</code>.
+            </p>
           </div>
         </div>
 
@@ -181,24 +164,25 @@ export default function Settings() {
           <div className="mt-4 pt-4 border-t">
             <button onClick={handleTestEmail} disabled={testing} className="btn-ghost text-sm">
               <TestTube2 size={14} className="inline mr-1" />
-              {testing ? 'Probando...' : 'Probar conexión SMTP'}
+              {testing ? 'Probando...' : 'Probar conexión con Brevo'}
             </button>
             <p className="text-xs text-slate-500 mt-1">
-              Verifica que las credenciales sean correctas antes de habilitar el envío.
+              Verifica que la API key sea válida y muestra créditos disponibles.
             </p>
           </div>
         )}
       </div>
 
-      {/* Guía SMTP */}
-      <div className="card bg-blue-50 border-blue-200">
-        <h3 className="font-semibold text-blue-900 text-sm mb-2">📧 Guía rápida para configurar SMTP</h3>
-        <div className="text-xs text-blue-900 space-y-2">
-          <p><strong>Gmail:</strong> Host = smtp.gmail.com · Puerto 587 · Usar contraseña de aplicación (no la del usuario). Generar en myaccount.google.com/apppasswords.</p>
-          <p><strong>Outlook / Office 365:</strong> Host = smtp.office365.com · Puerto 587 · SSL desactivado · Usuario es el email completo.</p>
-          <p><strong>SendGrid:</strong> Host = smtp.sendgrid.net · Puerto 587 · Usuario = "apikey" · Contraseña = la API key generada.</p>
-          <p><strong>Institucional muniguate.gt:</strong> Solicita al área de redes los datos de SMTP saliente.</p>
-        </div>
+      {/* Guía Brevo */}
+      <div className="card bg-green-50 border-green-200 mb-4">
+        <h3 className="font-semibold text-green-900 text-sm mb-2">📧 Pasos para configurar Brevo</h3>
+        <ol className="text-xs text-green-900 space-y-1.5 list-decimal list-inside">
+          <li>Crea cuenta gratis en <a href="https://www.brevo.com" target="_blank" rel="noreferrer" className="underline">brevo.com</a> (300 correos/día gratis).</li>
+          <li>Verifica el correo remitente en Brevo → <strong>Senders</strong> → Add a sender → te llega un email → click en "Verify".</li>
+          <li>Genera API key: Brevo → <strong>SMTP & API</strong> → <strong>Generate a new API key</strong> → copia el valor (xkeysib-...).</li>
+          <li>Pega la API key aquí arriba, marca "Habilitar envío", pulsa <strong>Guardar cambios</strong>.</li>
+          <li>Pulsa <strong>Probar conexión con Brevo</strong>. Debe decir "Conexión Brevo exitosa".</li>
+        </ol>
       </div>
     </div>
   );

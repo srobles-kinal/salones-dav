@@ -1,12 +1,27 @@
-const nodemailer = require('nodemailer');
 const logger = require('../../config/logger');
 const GSConfigRepository = require('../persistence/repositories/GSConfigRepository');
 
+const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
+
+/**
+ * EmailSender vía API HTTP de Brevo.
+ *
+ * Razón: Render bloqueó la salida SMTP (puertos 25/465/587) en el tier free
+ * desde septiembre 2025. Brevo permite enviar correos por API HTTP (puerto 443)
+ * que NO está bloqueado, con tier gratis de 300 correos/día.
+ *
+ * Configuración necesaria en la hoja `configuracion`:
+ *  - EMAIL_ENABLED        : true/false
+ *  - EMAIL_FROM           : remitente (DEBE estar verificado en Brevo)
+ *  - EMAIL_FROM_NAME      : nombre del remitente
+ *  - BREVO_API_KEY        : API key de Brevo (xkeysib-...)
+ *
+ * Los campos SMTP_* heredados ya no se usan pero se conservan para no romper
+ * la UI de Configuración. Si BREVO_API_KEY está vacío, se cae al modo legacy.
+ */
 class EmailSender {
   constructor() {
     this.configRepo = new GSConfigRepository();
-    this._transporter = null;
-    this._transporterKey = null;
     this._configCache = null;
     this._cacheExpiry = 0;
   }
@@ -17,114 +32,149 @@ class EmailSender {
     }
     const config = await this.configRepo.getAll();
     this._configCache = config;
-    this._cacheExpiry = Date.now() + 60_000; // 1 min
+    this._cacheExpiry = Date.now() + 60_000;
     return config;
-  }
-
-  /**
-   * Construye/retorna el transporter activo. Recrea si la config cambió.
-   * Clave de detección de cambios: HOST + PORT + USER + PASS + SECURE.
-   * Si cualquiera cambia, se recrea el transporter.
-   */
-  async _getTransporter(force = false) {
-    const config = await this._getConfig(force);
-    if (!config.EMAIL_ENABLED) {
-      logger.debug('Email deshabilitado en configuración');
-      return null;
-    }
-    if (!config.SMTP_HOST || !config.SMTP_USER) {
-      logger.warn('Email habilitado pero SMTP_HOST o SMTP_USER vacíos');
-      return null;
-    }
-
-    const key = `${config.SMTP_HOST}:${config.SMTP_PORT}:${config.SMTP_USER}:${config.SMTP_SECURE}:${config.SMTP_PASS ? config.SMTP_PASS.length : 0}`;
-    if (this._transporter && this._transporterKey === key) {
-      return this._transporter;
-    }
-
-    logger.info('Creando nuevo transporter SMTP', {
-      host: config.SMTP_HOST, port: config.SMTP_PORT, user: config.SMTP_USER, secure: config.SMTP_SECURE,
-    });
-
-    this._transporter = nodemailer.createTransport({
-      host: config.SMTP_HOST,
-      port: Number(config.SMTP_PORT) || 587,
-      secure: !!config.SMTP_SECURE,
-      auth: { user: config.SMTP_USER, pass: config.SMTP_PASS },
-      // Timeouts razonables para no colgar el sistema
-      connectionTimeout: 10_000,
-      greetingTimeout: 10_000,
-      socketTimeout: 15_000,
-    });
-    this._transporterKey = key;
-    return this._transporter;
   }
 
   invalidateCache() {
     this._configCache = null;
     this._cacheExpiry = 0;
-    this._transporter = null;
-    this._transporterKey = null;
   }
 
   async send({ to, subject, html, text }) {
     try {
-      const transporter = await this._getTransporter();
-      if (!transporter) return { ok: false, skipped: true, reason: 'Email deshabilitado o sin configurar' };
-
       const config = await this._getConfig();
-      const from = config.EMAIL_FROM_NAME
-        ? `"${config.EMAIL_FROM_NAME}" <${config.EMAIL_FROM}>`
-        : config.EMAIL_FROM;
 
-      const info = await transporter.sendMail({ from, to, subject, html, text });
-      logger.info('Email enviado correctamente', {
-        to, subject, messageId: info.messageId, response: info.response,
+      if (!config.EMAIL_ENABLED) {
+        return { ok: false, skipped: true, reason: 'Email deshabilitado en Configuración' };
+      }
+      if (!config.BREVO_API_KEY) {
+        return { ok: false, skipped: true, reason: 'BREVO_API_KEY no configurada' };
+      }
+      if (!config.EMAIL_FROM) {
+        return { ok: false, skipped: true, reason: 'EMAIL_FROM no configurado' };
+      }
+
+      const body = {
+        sender: {
+          email: config.EMAIL_FROM,
+          name: config.EMAIL_FROM_NAME || 'Sistema de Salones DAV',
+        },
+        to: [{ email: to }],
+        subject,
+        htmlContent: html,
+        textContent: text || undefined,
+      };
+
+      const res = await fetch(BREVO_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'api-key': config.BREVO_API_KEY,
+          'accept': 'application/json',
+        },
+        body: JSON.stringify(body),
       });
-      return { ok: true, messageId: info.messageId };
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        logger.error('Error enviando email vía Brevo', {
+          to, subject, status: res.status, brevoError: data,
+        });
+        return {
+          ok: false,
+          error: data.message || data.code || `HTTP ${res.status}`,
+          hint: this._hintForBrevoError(res.status, data),
+        };
+      }
+
+      logger.info('Email enviado correctamente vía Brevo', {
+        to, subject, messageId: data.messageId,
+      });
+      return { ok: true, messageId: data.messageId };
+
     } catch (err) {
-      logger.error('Error enviando email', {
-        to, subject, error: err.message, code: err.code, command: err.command,
+      logger.error('Excepción al enviar email vía Brevo', {
+        to, subject, error: err.message,
       });
       return {
         ok: false,
         error: err.message,
-        code: err.code,
-        hint: this._hintForError(err),
+        hint: 'Error de red al contactar Brevo. Verifica conexión a internet.',
       };
     }
   }
 
-  /**
-   * Hint humano para los errores SMTP más comunes.
-   */
-  _hintForError(err) {
-    const msg = (err.message || '').toLowerCase();
-    if (msg.includes('eauth') || msg.includes('invalid login') || msg.includes('username and password')) {
-      return 'Credenciales SMTP rechazadas. En Gmail usa contraseña de aplicación, no la del usuario.';
+  _hintForBrevoError(status, data) {
+    const code = data.code || '';
+    const msg = (data.message || '').toLowerCase();
+
+    if (status === 401 || code === 'unauthorized') {
+      return 'API key de Brevo inválida o revocada. Genera una nueva en app.brevo.com → SMTP & API.';
     }
-    if (msg.includes('econnrefused')) return 'No se pudo conectar al servidor SMTP. Verifica HOST y PORT.';
-    if (msg.includes('etimedout') || msg.includes('timeout')) return 'Tiempo de espera agotado. El servidor SMTP no responde o el firewall bloquea la conexión.';
-    if (msg.includes('certificate') || msg.includes('self signed')) return 'Problema de certificado SSL. Si usas SMTP institucional sin SSL, desmarca la casilla "Conexión SSL".';
-    if (msg.includes('relay') || msg.includes('not allowed')) return 'El servidor SMTP rechaza el envío. Verifica que tu cuenta tenga permiso de relay.';
-    return 'Revisa la configuración SMTP en Configuración → Notificaciones por correo.';
+    if (status === 400 && msg.includes('sender')) {
+      return 'El EMAIL_FROM no está verificado en Brevo. Ve a Brevo → Senders y verifica esa dirección.';
+    }
+    if (status === 400) {
+      return 'Datos del correo inválidos (revisa destinatario, asunto, contenido).';
+    }
+    if (status === 402 || msg.includes('credit')) {
+      return 'Sin créditos en Brevo. El tier gratis es 300/día; revisa tu cuenta.';
+    }
+    if (status === 429) {
+      return 'Demasiados correos enviados en poco tiempo. Espera unos minutos.';
+    }
+    return 'Revisa los logs y la documentación de Brevo: https://developers.brevo.com';
   }
 
+  /**
+   * Verifica que la API key sea válida haciendo una llamada al endpoint /account.
+   */
   async testConnection() {
     try {
-      // Forzar recreación con la config más reciente
       this.invalidateCache();
-      const transporter = await this._getTransporter(true);
-      if (!transporter) return { ok: false, message: 'Email deshabilitado o SMTP sin configurar' };
+      const config = await this._getConfig(true);
 
-      await transporter.verify();
-      return { ok: true, message: '✓ Conexión SMTP exitosa. El servidor aceptó las credenciales.' };
+      if (!config.EMAIL_ENABLED) {
+        return { ok: false, message: 'Email deshabilitado. Marca la casilla en Configuración.' };
+      }
+      if (!config.BREVO_API_KEY) {
+        return { ok: false, message: 'Falta la API key de Brevo. Ingresa BREVO_API_KEY en Configuración.' };
+      }
+      if (!config.EMAIL_FROM) {
+        return { ok: false, message: 'Falta el correo remitente (EMAIL_FROM).' };
+      }
+
+      const res = await fetch('https://api.brevo.com/v3/account', {
+        method: 'GET',
+        headers: {
+          'api-key': config.BREVO_API_KEY,
+          'accept': 'application/json',
+        },
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        return {
+          ok: false,
+          message: data.message || `HTTP ${res.status}`,
+          hint: this._hintForBrevoError(res.status, data),
+        };
+      }
+
+      const plan = data.plan?.[0]?.type || 'free';
+      const credits = data.plan?.[0]?.credits ?? '?';
+      return {
+        ok: true,
+        message: `✓ Conexión Brevo exitosa. Plan: ${plan}. Créditos: ${credits}. Cuenta: ${data.email}.`,
+      };
     } catch (err) {
-      logger.error('Test SMTP falló', { error: err.message, code: err.code });
+      logger.error('Test Brevo falló', { error: err.message });
       return {
         ok: false,
         message: err.message,
-        hint: this._hintForError(err),
+        hint: 'Error de red al contactar Brevo.',
       };
     }
   }
