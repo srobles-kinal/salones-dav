@@ -16,13 +16,13 @@ const menuItems = [
   { path: '/audit', label: 'Auditoría', icon: Shield, permission: 'audit:read' },
 ];
 
-export default function Sidebar() {
+export default function Sidebar({ onNavigate }) {
   const { user, logout } = useAuth();
   const { hasPermission } = usePermission();
   const visible = menuItems.filter(i => hasPermission(i.permission));
 
   return (
-    <aside className="w-64 bg-white border-r border-slate-200 flex flex-col h-screen sticky top-0">
+    <aside className="w-64 bg-white border-r border-slate-200 flex flex-col h-screen">
       <div className="p-6 border-b">
         <div className="flex items-center gap-3">
           <img src={escudo} alt="Escudo Muniguate" className="w-10 h-auto" />
@@ -36,6 +36,7 @@ export default function Sidebar() {
       <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
         {visible.map(item => (
           <NavLink key={item.path} to={item.path}
+            onClick={() => onNavigate && onNavigate()}
             className={({ isActive }) =>
               `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                 isActive ? 'bg-muni-primary text-white' : 'text-slate-700 hover:bg-slate-100'
