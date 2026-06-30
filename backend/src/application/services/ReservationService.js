@@ -1,5 +1,13 @@
+/**
+ * ReservationService — Lógica de negocio de reservas de capacitación.
+ * Sistema de Gestión y Reservación de Salones
+ * Dirección de Atención al Vecino · Municipalidad de Guatemala
+ *
+ * Autor: Sergio Robles García
+ */
 const GSReservationRepository = require('../../infrastructure/persistence/repositories/GSReservationRepository');
 const GSSalonRepository = require('../../infrastructure/persistence/repositories/GSSalonRepository');
+const GSUserRepository = require('../../infrastructure/persistence/repositories/GSUserRepository');
 const NotificationService = require('./NotificationService');
 const logger = require('../../config/logger');
 const { ConflictError, NotFoundError, BusinessError, ValidationError } = require('../../shared/errors/AppError');
@@ -11,6 +19,7 @@ class ReservationService {
   constructor() {
     this.repo = new GSReservationRepository();
     this.salonRepo = new GSSalonRepository();
+    this.userRepo = new GSUserRepository();
     this.notifier = new NotificationService();
   }
 
@@ -19,6 +28,19 @@ class ReservationService {
       const salon = await this.salonRepo.findById(salonId);
       return salon?.nombre || salonId;
     } catch { return salonId; }
+  }
+
+  /**
+   * Devuelve el nombre completo de un usuario a partir de su id.
+   * Si no se encuentra, retorna el email como respaldo, y si tampoco, el id.
+   */
+  async _getUserDisplayName(userId, fallbackEmail) {
+    try {
+      const u = await this.userRepo.findById(userId);
+      return u?.nombre_completo || u?.nombre || fallbackEmail || userId;
+    } catch {
+      return fallbackEmail || userId;
+    }
   }
 
   _checkOverlap(existing, newStart, newEnd, excludeId = null) {
@@ -87,7 +109,6 @@ class ReservationService {
 
     const created = await this.repo.create(reservation);
 
-    // Notificación PENDIENTE (best-effort, no bloqueante)
     const salonName = await this._getSalonName(data.salon_id);
     this.notifier.notifyReservationCreated(created, salonName)
       .catch(err => logger.error('Email error PENDIENTE', { err: err.message }));
@@ -102,7 +123,6 @@ class ReservationService {
         'Solo se pueden editar reservas en estado PENDIENTE');
     }
 
-    // Si cambian horario/fecha/salon, revalidar traslapes
     const willChange = ['fecha', 'hora_inicio', 'hora_fin', 'salon_id'].some(k => k in data);
     if (willChange) {
       const fecha = data.fecha || existing.fecha;
@@ -130,18 +150,25 @@ class ReservationService {
 
   async approve(id, user) {
     const r = await this.getById(id);
+
+    // Idempotencia: si ya está aprobada, devolverla sin reprocesar ni reenviar correo.
+    if (r.estado === ESTADOS_RESERVA.APROBADA) {
+      logger.info('approve idempotente: reserva ya aprobada', { id });
+      return r;
+    }
     if (r.estado !== ESTADOS_RESERVA.PENDIENTE) {
       throw new BusinessError('INVALID_STATE', `No se puede aprobar una reserva en estado ${r.estado}`);
     }
+
     const updated = await this.repo.update(id, {
       estado: ESTADOS_RESERVA.APROBADA,
       aprobada_por: user.id,
       aprobada_en: new Date().toISOString(),
     });
 
-    // Notificación APROBADA
     const salonName = await this._getSalonName(updated.salon_id);
-    this.notifier.notifyReservationApproved(updated, salonName, user.email)
+    const aprobadorNombre = await this._getUserDisplayName(user.id, user.email);
+    this.notifier.notifyReservationApproved(updated, salonName, aprobadorNombre)
       .catch(err => logger.error('Email error APROBADA', { err: err.message }));
 
     return updated;
@@ -149,9 +176,16 @@ class ReservationService {
 
   async reject(id, user, motivo) {
     const r = await this.getById(id);
+
+    // Idempotencia: si ya está rechazada, devolverla sin reprocesar ni reenviar correo.
+    if (r.estado === ESTADOS_RESERVA.RECHAZADA) {
+      logger.info('reject idempotente: reserva ya rechazada', { id });
+      return r;
+    }
     if (r.estado !== ESTADOS_RESERVA.PENDIENTE) {
       throw new BusinessError('INVALID_STATE', `No se puede rechazar una reserva en estado ${r.estado}`);
     }
+
     const motivoFinal = motivo || 'Sin motivo especificado';
     const updated = await this.repo.update(id, {
       estado: ESTADOS_RESERVA.RECHAZADA,
@@ -160,9 +194,9 @@ class ReservationService {
       motivo_rechazo: motivoFinal,
     });
 
-    // Notificación RECHAZADA
     const salonName = await this._getSalonName(updated.salon_id);
-    this.notifier.notifyReservationRejected(updated, salonName, motivoFinal, user.email)
+    const rechazadorNombre = await this._getUserDisplayName(user.id, user.email);
+    this.notifier.notifyReservationRejected(updated, salonName, motivoFinal, rechazadorNombre)
       .catch(err => logger.error('Email error RECHAZADA', { err: err.message }));
 
     return updated;
@@ -173,7 +207,11 @@ class ReservationService {
     if (!canCancelAny && r.creado_por !== userId) {
       throw new BusinessError('NOT_OWNER', 'Solo puedes cancelar tus propias reservas');
     }
-    if ([ESTADOS_RESERVA.CANCELADA, ESTADOS_RESERVA.COMPLETADA].includes(r.estado)) {
+    // Idempotencia: si ya está cancelada, devolverla sin error.
+    if (r.estado === ESTADOS_RESERVA.CANCELADA) {
+      return r;
+    }
+    if (r.estado === ESTADOS_RESERVA.COMPLETADA) {
       throw new BusinessError('INVALID_STATE', `No se puede cancelar una reserva ${r.estado}`);
     }
     return this.repo.update(id, { estado: ESTADOS_RESERVA.CANCELADA });

@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { useNavigate, Navigate } from 'react-router-dom';
-import { Building2, Lock, Mail } from 'lucide-react';
+import { Lock, Mail } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
+import escudo from '../assets/escudo.png';
 
 export default function Login() {
   const { user, login } = useAuth();
@@ -30,11 +31,10 @@ export default function Login() {
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-muni-primary to-blue-800 p-4">
       <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-8">
         <div className="text-center mb-8">
-          <div className="w-16 h-16 bg-muni-primary rounded-2xl flex items-center justify-center mx-auto mb-4">
-            <Building2 className="text-white" size={32} />
-          </div>
+          <img src={escudo} alt="Escudo Municipalidad de Guatemala"
+               className="w-20 h-auto mx-auto mb-4" />
           <h1 className="text-2xl font-bold text-slate-900">Salones DAV</h1>
-          <p className="text-slate-500 mt-1">Atención al Vecino - Muniguate</p>
+          <p className="text-slate-500 mt-1">Atención al Vecino · Muniguate</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">

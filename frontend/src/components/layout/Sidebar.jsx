@@ -1,7 +1,8 @@
 import { NavLink } from 'react-router-dom';
-import { Home, Baby, Calendar, Users, Shield, LogOut, Building2, Settings, KeyRound, Mail, MapPin } from 'lucide-react';
+import { Home, Baby, Calendar, Users, Shield, LogOut, Settings, KeyRound, Mail, MapPin } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { usePermission } from '../../hooks/usePermission';
+import escudo from '../../assets/escudo.png';
 
 const menuItems = [
   { path: '/dashboard', label: 'Dashboard', icon: Home, permission: 'dashboard:read' },
@@ -24,9 +25,7 @@ export default function Sidebar() {
     <aside className="w-64 bg-white border-r border-slate-200 flex flex-col h-screen sticky top-0">
       <div className="p-6 border-b">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-muni-primary rounded-lg flex items-center justify-center">
-            <Building2 className="text-white" size={22} />
-          </div>
+          <img src={escudo} alt="Escudo Muniguate" className="w-10 h-auto" />
           <div>
             <h1 className="font-bold text-slate-900 text-sm leading-tight">Salones DAV</h1>
             <p className="text-xs text-slate-500">Muniguate</p>
