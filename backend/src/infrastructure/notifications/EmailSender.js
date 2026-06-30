@@ -4,21 +4,49 @@ const GSConfigRepository = require('../persistence/repositories/GSConfigReposito
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
 /**
- * EmailSender vía API HTTP de Brevo.
- *
- * Razón: Render bloqueó la salida SMTP (puertos 25/465/587) en el tier free
- * desde septiembre 2025. Brevo permite enviar correos por API HTTP (puerto 443)
- * que NO está bloqueado, con tier gratis de 300 correos/día.
- *
- * Configuración necesaria en la hoja `configuracion`:
- *  - EMAIL_ENABLED        : true/false
- *  - EMAIL_FROM           : remitente (DEBE estar verificado en Brevo)
- *  - EMAIL_FROM_NAME      : nombre del remitente
- *  - BREVO_API_KEY        : API key de Brevo (xkeysib-...)
- *
- * Los campos SMTP_* heredados ya no se usan pero se conservan para no romper
- * la UI de Configuración. Si BREVO_API_KEY está vacío, se cae al modo legacy.
+ * Convierte HTML a texto plano legible (para el textContent del correo).
+ * Si el "texto" que recibimos en realidad es HTML, lo limpiamos aquí.
  */
+function htmlToPlainText(input) {
+  if (!input) return '';
+  // Si no parece HTML, devolverlo tal cual
+  if (!/<[a-z][\s\S]*>/i.test(input)) return input;
+  return input
+    .replace(/<style[\s\S]*?<\/style>/gi, '')   // quita bloques <style>
+    .replace(/<script[\s\S]*?<\/script>/gi, '') // quita <script>
+    .replace(/<\/(p|div|tr|h[1-6]|li)>/gi, '\n') // saltos por bloques
+    .replace(/<br\s*\/?>/gi, '\n')               // <br> -> salto
+    .replace(/<[^>]+>/g, '')                     // quita el resto de etiquetas
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/\n{3,}/g, '\n\n')                  // colapsa saltos múltiples
+    .trim();
+}
+
+/**
+ * Decodifica entidades HTML escapadas en el htmlContent.
+ * Esto repara plantillas que se guardaron con &lt; en vez de <.
+ */
+function unescapeHtmlIfNeeded(html) {
+  if (!html) return '';
+  // Si contiene etiquetas reales, ya está bien
+  if (/<[a-z][\s\S]*>/i.test(html)) return html;
+  // Si está escapado (&lt;table&gt;...), lo desescapamos
+  if (/&lt;[a-z]/i.test(html)) {
+    return html
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, '&');
+  }
+  return html;
+}
+
 class EmailSender {
   constructor() {
     this.configRepo = new GSConfigRepository();
@@ -55,6 +83,16 @@ class EmailSender {
         return { ok: false, skipped: true, reason: 'EMAIL_FROM no configurado' };
       }
 
+      // === FIX CORREO HTML CRUDO ===
+      // 1. Asegurar que el HTML sea HTML real (desescapar si vino con &lt;)
+      const cleanHtml = unescapeHtmlIfNeeded(html);
+      // 2. Generar texto plano de verdad: si nos pasaron HTML como "texto",
+      //    o no nos pasaron texto, lo derivamos del HTML limpio.
+      let cleanText = text;
+      if (!cleanText || /<[a-z][\s\S]*>/i.test(cleanText)) {
+        cleanText = htmlToPlainText(cleanHtml);
+      }
+
       const body = {
         sender: {
           email: config.EMAIL_FROM,
@@ -62,8 +100,8 @@ class EmailSender {
         },
         to: [{ email: to }],
         subject,
-        htmlContent: html,
-        textContent: text || undefined,
+        htmlContent: cleanHtml,
+        textContent: cleanText || undefined,
       };
 
       const res = await fetch(BREVO_API_URL, {
@@ -109,73 +147,40 @@ class EmailSender {
   _hintForBrevoError(status, data) {
     const code = data.code || '';
     const msg = (data.message || '').toLowerCase();
-
     if (status === 401 || code === 'unauthorized') {
       return 'API key de Brevo inválida o revocada. Genera una nueva en app.brevo.com → SMTP & API.';
     }
     if (status === 400 && msg.includes('sender')) {
       return 'El EMAIL_FROM no está verificado en Brevo. Ve a Brevo → Senders y verifica esa dirección.';
     }
-    if (status === 400) {
-      return 'Datos del correo inválidos (revisa destinatario, asunto, contenido).';
-    }
-    if (status === 402 || msg.includes('credit')) {
-      return 'Sin créditos en Brevo. El tier gratis es 300/día; revisa tu cuenta.';
-    }
-    if (status === 429) {
-      return 'Demasiados correos enviados en poco tiempo. Espera unos minutos.';
-    }
+    if (status === 400) return 'Datos del correo inválidos (revisa destinatario, asunto, contenido).';
+    if (status === 402 || msg.includes('credit')) return 'Sin créditos en Brevo. El tier gratis es 300/día.';
+    if (status === 429) return 'Demasiados correos en poco tiempo. Espera unos minutos.';
     return 'Revisa los logs y la documentación de Brevo: https://developers.brevo.com';
   }
 
-  /**
-   * Verifica que la API key sea válida haciendo una llamada al endpoint /account.
-   */
   async testConnection() {
     try {
       this.invalidateCache();
       const config = await this._getConfig(true);
-
-      if (!config.EMAIL_ENABLED) {
-        return { ok: false, message: 'Email deshabilitado. Marca la casilla en Configuración.' };
-      }
-      if (!config.BREVO_API_KEY) {
-        return { ok: false, message: 'Falta la API key de Brevo. Ingresa BREVO_API_KEY en Configuración.' };
-      }
-      if (!config.EMAIL_FROM) {
-        return { ok: false, message: 'Falta el correo remitente (EMAIL_FROM).' };
-      }
+      if (!config.EMAIL_ENABLED) return { ok: false, message: 'Email deshabilitado. Marca la casilla en Configuración.' };
+      if (!config.BREVO_API_KEY) return { ok: false, message: 'Falta la API key de Brevo.' };
+      if (!config.EMAIL_FROM) return { ok: false, message: 'Falta el correo remitente (EMAIL_FROM).' };
 
       const res = await fetch('https://api.brevo.com/v3/account', {
         method: 'GET',
-        headers: {
-          'api-key': config.BREVO_API_KEY,
-          'accept': 'application/json',
-        },
+        headers: { 'api-key': config.BREVO_API_KEY, 'accept': 'application/json' },
       });
       const data = await res.json().catch(() => ({}));
-
       if (!res.ok) {
-        return {
-          ok: false,
-          message: data.message || `HTTP ${res.status}`,
-          hint: this._hintForBrevoError(res.status, data),
-        };
+        return { ok: false, message: data.message || `HTTP ${res.status}`, hint: this._hintForBrevoError(res.status, data) };
       }
-
       const plan = data.plan?.[0]?.type || 'free';
       const credits = data.plan?.[0]?.credits ?? '?';
-      return {
-        ok: true,
-        message: `✓ Conexión Brevo exitosa. Plan: ${plan}. Créditos: ${credits}. Cuenta: ${data.email}.`,
-      };
+      return { ok: true, message: `✓ Conexión Brevo exitosa. Plan: ${plan}. Créditos: ${credits}. Cuenta: ${data.email}.` };
     } catch (err) {
       logger.error('Test Brevo falló', { error: err.message });
-      return {
-        ok: false,
-        message: err.message,
-        hint: 'Error de red al contactar Brevo.',
-      };
+      return { ok: false, message: err.message, hint: 'Error de red al contactar Brevo.' };
     }
   }
 }
